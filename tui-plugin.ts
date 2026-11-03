@@ -4,6 +4,7 @@
 import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { spellcheck } from "./spellcheck.ts"
 import { generateText } from "./generate.ts"
+import { completePrompt, spellcheckPrompt } from "./prompt-templates.ts"
 
 const id = "opencode-autocomplete"
 
@@ -28,7 +29,7 @@ const plugin: TuiPlugin = async (api) => {
       // Stateless completion via the experimental generate route — no session
       // created, returns the assistant text directly.
       const completion = await generateText({
-        prompt: `Complete the following prompt; reply with ONLY the completion text, no quotes:\n${current}`,
+        prompt: completePrompt(current),
         model: null,
       })
       if (!completion) return

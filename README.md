@@ -66,8 +66,8 @@ to copy rather than inserted inline.
 
 ## Install (v1)
 
-Copy `tui-plugin.ts`, `spellcheck.ts`, and `generate.ts` into
-`~/.config/opencode/tui-plugins/` and add `tui-plugin.ts` to `tui.json`'s
+Copy `tui-plugin.ts`, `spellcheck.ts`, `generate.ts`, and `prompt-templates.ts`
+into `~/.config/opencode/tui-plugins/` and add `tui-plugin.ts` to `tui.json`'s
 `plugin` array, then restart OpenCode.
 
 ## Install (v2)
