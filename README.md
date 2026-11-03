@@ -8,7 +8,7 @@ configurable spellchecker.
 | Generation | File | Mechanism | Tab override |
 |------------|------|-----------|--------------|
 | OpenCode v1 | `tui-plugin.ts` | `@opencode-ai/plugin/tui` (`TuiPlugin`) | ✅ via `api.keymap.registerLayer` binding `tab` → `autocomplete.tab` |
-| OpenCode v2 | `tui-plugin.v2.ts` | `@opencode/plugin` (`{ id, setup(ctx) }`) | ❌ v2 exposes no TUI/keymap plugin surface; autocomplete + spellcheck exposed on `ctx.opencodeAutocomplete` |
+| OpenCode v2 | `tui-plugin.v2/tui.ts` | `@opencode/plugin/tui` TUI plugin | ✅ Tab override via `ctx.keymap.layer` with `bind: "tab"`; completion surfaced via dialog (v2 TUI has no documented prompt-input ref for inline insertion) |
 
 ## What it does (v1)
 
@@ -59,8 +59,10 @@ Best-effort recreation of Cursor's tab completion within OpenCode's plugin API.
 Ghost-text rendering and streaming acceptance are limited by the available
 prompt surface; this implementation performs a completion pass on Tab and
 inserts the result at the end of the input (cursor position is not tracked from
-the TUI ref). The v2 Tab override is not available because v2 exposes no
-keymap/TUI surface to plugins.
+the TUI ref). In v2 the Tab binding is registered via `ctx.keymap.layer` with
+`bind: "tab"`, but the v2 TUI API surface does not document reading or writing
+the live prompt input, so the completion is surfaced in a dialog for the user
+to copy rather than inserted inline.
 
 ## Install (v1)
 
@@ -70,7 +72,8 @@ Copy `tui-plugin.ts`, `spellcheck.ts`, and `generate.ts` into
 
 ## Install (v2)
 
-Copy `tui-plugin.v2.ts`, `spellcheck.ts`, and `generate.ts` into
-`~/.opencode/plugins/`. v2 globs that directory and calls `setup()` with no
-config entry required. Autocomplete/spellcheck are exposed on
+Copy `tui-plugin.v2/` (the directory containing `tui.ts`), `spellcheck.ts`, and
+`generate.ts` into `~/.opencode/plugins/`. v2 discovers local plugins from
+`.opencode/plugins/` and loads a TUI plugin's `tui.ts` entrypoint; no config
+entry is required. Autocomplete/spellcheck are exposed on
 `ctx.opencodeAutocomplete` for other v2 tooling to drive.
