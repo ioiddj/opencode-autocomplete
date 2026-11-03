@@ -1,263 +1,313 @@
 #!/usr/bin/env bash
-# install.sh — install opencode-autocomplete for OpenCode v1 and/or v2.
-#
-# Usage:
-#   curl -fsSL <install.sh> | sh            # install both generations
-#   curl -fsSL <install.sh> | sh -s v1      # install v1 only
-#   curl -fsSL <install.sh> | sh -s v2      # install v2 only
-#   curl -fsSL <install.sh> | sh -s uninstall   # remove both generations
-#
-# Idempotent and reversible: backs up any file it touches; `uninstall` restores
-# the previous state from backups. All plugin source lives in this repo, which
-# is expected to be served at the same URL as this script (nothing else is
-# downloaded).
-#
-# Environment overrides:
-#   OCA_V1_CONFIG_DIR   default ~/.config/opencode
-#   OCA_V2_CONFIG_DIR   default ~/.opencode
-#   OCA_BACKUP_ROOT     default ~/.local/share/opencode-autocomplete/backups
-#   OCA_DRY_RUN=1       print the plan without mutating
-set -euo pipefail
+# shellcheck shell=bash
+# Install OpenCode autocomplete for v1, v2, or both.
+# Backups preserve the pre-install state; uninstall restores that baseline.
+set -Eeuo pipefail
 
-log()  { printf '%s\n' "$*" >&2; }
-err()  { printf 'install.sh: %s\n' "$*" >&2; }
-die()  { err "$*"; exit 1; }
-note() { printf '  -> %s\n' "$*" >&2; }
+V1_CONFIG_DIR=${OCA_V1_CONFIG_DIR:-${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}}
+V2_CONFIG_DIR=${OCA_V2_CONFIG_DIR:-$HOME/.opencode}
+BACKUP_ROOT=${OCA_BACKUP_ROOT:-$HOME/.local/share/opencode-autocomplete}
+OCA_BASE_URL=${OCA_BASE_URL:-}
+DRY_RUN=false
+MODE=both
 
-DRY_RUN=${OCA_DRY_RUN:-0}
+usage() {
+  cat <<'USAGE'
+Usage: install.sh [both|v1|v2|uninstall] [--dry-run]
 
-do_cmd() {
-  if [ "$DRY_RUN" = "1" ]; then
-    note "[dry-run] $*"
-  else
-    note "$*"
-    eval "$@"
-  fi
+Install from a checkout, or pipe this script from a host and set OCA_BASE_URL
+in the receiving shell to that host's directory of raw repository files.
+
+Environment:
+  OCA_BASE_URL        Base URL for raw files when not run from a checkout
+  OCA_V1_CONFIG_DIR   v1 config directory (default ~/.config/opencode)
+  OCA_V2_CONFIG_DIR   v2 config directory (default ~/.opencode)
+  OCA_BACKUP_ROOT     backup state directory
+
+Examples:
+  ./install.sh --dry-run
+  ./install.sh v1
+  OCA_BASE_URL=https://host/repo/main curl -fsSL https://host/repo/main/install.sh | \\
+    OCA_BASE_URL=https://host/repo/main bash -s -- both
+  ./install.sh uninstall
+USAGE
 }
 
-# Back up a file (or record its absence) under a timestamped backup dir.
-# Returns the backup path. Respects DRY_RUN (skips the actual copy).
-backup_file() {
-  local src="$1" bakdir="$2"
-  mkdir -p "$bakdir"
-  local rel="${src#"$HOME"/}"
-  local bak="$bakdir/$rel"
-  mkdir -p "$(dirname "$bak")"
-  # record the absolute original path so uninstall restores/deletes the right file
-  # (env overrides may point outside $HOME).
-  printf '%s\n' "$src" > "$bak.orig"
-  if [ -e "$src" ] || [ -L "$src" ]; then
-    if [ ! -e "$bak" ]; then
-      if [ "$DRY_RUN" = "1" ]; then
-        note "[dry-run] cp -a $src $bak"
-      else
-        cp -a "$src" "$bak"
-      fi
+log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+on_error() {
+  local status=$1 line=$2
+  log "ERROR: failed at line $line (exit $status); install may be partial; rerun installer or uninstall"
+  exit "$status"
+}
+trap 'on_error "$?" "$LINENO"' ERR
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=true ;;
+    --help|-h) usage; exit 0 ;;
+    both|v1|v2|uninstall)
+      if [[ "$MODE" != both ]]; then die "multiple modes specified"; fi
+      MODE=$arg ;;
+    *) die "unknown argument: $arg (try --help)" ;;
+  esac
+done
+
+# Find a checked-out repository only when the required files exist beside this
+# script. With curl|bash, stdin has no reliable filesystem path: use OCA_BASE_URL.
+SCRIPT_SOURCE=${BASH_SOURCE[0]:-$0}
+SCRIPT_DIR=""
+if SCRIPT_DIR=$(cd -- "$(dirname -- "$SCRIPT_SOURCE")" 2>/dev/null); then
+  SCRIPT_DIR=$(cd -- "$SCRIPT_DIR" && pwd -P)
+fi
+REPO_ROOT=""
+if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/tui-plugin.ts" ]]; then
+  REPO_ROOT=$SCRIPT_DIR
+fi
+
+if [[ "$MODE" != uninstall && -z "$REPO_ROOT" && -z "$OCA_BASE_URL" ]]; then
+  die "no checkout detected; set OCA_BASE_URL to the raw repository directory (see --help)"
+fi
+
+# Immutable first-install baseline. A later reinstall never overwrites it.
+STATE_DIR="$BACKUP_ROOT/install-state"
+STATE_ENTRIES="$STATE_DIR/entries"
+
+source_for() {
+  local relative=$1
+  if [[ -n "$REPO_ROOT" ]]; then
+    printf '%s\n' "$REPO_ROOT/$relative"
+    return
+  fi
+  local destination="$STATE_DIR/downloads/$relative"
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY-RUN: would download ${OCA_BASE_URL%/}/$relative"
+    printf '%s\n' "$destination"
+    return
+  fi
+  mkdir -p "$(dirname "$destination")"
+  curl --fail --silent --show-error --location \
+    "${OCA_BASE_URL%/}/$relative" --output "$destination"
+  printf '%s\n' "$destination"
+}
+
+# Save original path plus its original state exactly once per destination.
+backup_once() {
+  local destination=$1 entry pathfile index=0
+  if [[ "$DRY_RUN" == true ]]; then
+    if [[ -e "$destination" || -L "$destination" ]]; then
+      log "DRY-RUN: would back up $destination"
+    else
+      log "DRY-RUN: $destination did not exist; uninstall would remove it"
     fi
-    : > "$bak.exists"
-  else
-    : > "$bak.absent"
+    return
   fi
-  echo "$bak"
+  mkdir -p "$STATE_ENTRIES"
+  while :; do
+    entry="$STATE_ENTRIES/$index"
+    pathfile="$entry/path"
+    if [[ ! -e "$pathfile" ]]; then
+      mkdir -p "$entry"
+      printf '%s' "$destination" > "$pathfile"
+      if [[ -L "$destination" ]]; then
+        printf symlink > "$entry/kind"
+        cp -a -- "$destination" "$entry/original"
+      elif [[ -d "$destination" ]]; then
+        printf directory > "$entry/kind"
+        cp -a -- "$destination" "$entry/original"
+      elif [[ -f "$destination" ]]; then
+        printf file > "$entry/kind"
+        cp -a -- "$destination" "$entry/original"
+      else
+        printf absent > "$entry/kind"
+      fi
+      return
+    fi
+    if [[ "$(cat "$pathfile")" == "$destination" ]]; then return; fi
+    ((index += 1))
+  done
 }
 
-###############################################################################
-# Paths
-###############################################################################
+install_file() {
+  local relative=$1 destination=$2 source
+  source=$(source_for "$relative")
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY-RUN: would install $relative -> $destination"
+    return
+  fi
+  [[ -f "$source" ]] || die "source file missing: $source"
+  backup_once "$destination"
+  mkdir -p "$(dirname "$destination")"
+  cp -- "$source" "$destination"
+}
 
-V1_CONFIG_DIR="${OCA_V1_CONFIG_DIR:-$HOME/.config/opencode}"
-V2_CONFIG_DIR="${OCA_V2_CONFIG_DIR:-$HOME/.opencode}"
+register_v1() {
+  local config=$V1_CONFIG_DIR/tui.json plugin_path=$V1_CONFIG_DIR/tui-plugins/tui-plugin.ts
+  backup_once "$config"
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY-RUN: would add $plugin_path to $config plugin array"
+    return
+  fi
+  python3 - "$config" "$plugin_path" <<'PY'
+import json
+import pathlib
+import sys
 
-V1_TUI_PLUGINS="$V1_CONFIG_DIR/tui-plugins"
-V1_TUI_JSON="$V1_CONFIG_DIR/tui.json"
-V2_PLUGINS="$V2_CONFIG_DIR/plugins"
+path = pathlib.Path(sys.argv[1])
+plugin = sys.argv[2]
+text = path.read_text() if path.exists() else '{\n  "plugin": []\n}\n'
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# install.sh lives at the repo root.
-REPO_ROOT="$SCRIPT_DIR"
+# JSONC-aware scan for the root-level "plugin" array. We skip comments and
+# quoted strings while locating it; insert the new path as the first item so
+# existing comments/bytes and commas remain untouched.
+i, n, depth, target = 0, len(text), 0, None
+while i < n:
+    if text.startswith('//', i):
+        end = text.find('\n', i + 2)
+        i = n if end < 0 else end + 1
+        continue
+    if text.startswith('/*', i):
+        end = text.find('*/', i + 2)
+        if end < 0:
+            raise SystemExit('invalid tui.json: unterminated block comment')
+        i = end + 2
+        continue
+    ch = text[i]
+    if ch == '"':
+        start = i
+        i += 1
+        escaped = False
+        while i < n:
+            if escaped:
+                escaped = False
+            elif text[i] == '\\':
+                escaped = True
+            elif text[i] == '"':
+                i += 1
+                break
+            i += 1
+        else:
+            raise SystemExit('invalid tui.json: unterminated string')
+        raw = text[start:i]
+        if depth == 1:
+            try:
+                key = json.loads(raw)
+            except Exception:
+                key = None
+            if key == 'plugin':
+                j = i
+                while j < n and text[j].isspace(): j += 1
+                if j >= n or text[j] != ':': continue
+                j += 1
+                while j < n and text[j].isspace(): j += 1
+                if j < n and text[j] == '[':
+                    target = j
+                    break
+        continue
+    if ch == '{': depth += 1
+    elif ch == '}': depth -= 1
+    i += 1
 
-V1_FILES=(tui-plugin.ts spellcheck.ts generate.ts prompt-templates.ts)
-V2_FILES=(tui-plugin.v2/tui.ts spellcheck.ts generate.ts prompt-templates.ts)
+if target is None:
+    raise SystemExit('cannot find root-level "plugin" array in tui.json')
 
-BACKUP_ROOT="${OCA_BACKUP_ROOT:-$HOME/.local/share/opencode-autocomplete/backups}"
-TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+# Check for an existing exact JSON string anywhere inside the selected array.
+j, k, nested, strings = target + 1, target + 1, 0, []
+while j < n:
+    if text.startswith('//', j):
+        end = text.find('\n', j + 2)
+        j = n if end < 0 else end + 1
+        continue
+    if text.startswith('/*', j):
+        end = text.find('*/', j + 2)
+        if end < 0: raise SystemExit('invalid tui.json: unterminated block comment')
+        j = end + 2
+        continue
+    if text[j] == '"':
+        start = j
+        j += 1
+        escaped = False
+        while j < n:
+            if escaped: escaped = False
+            elif text[j] == '\\': escaped = True
+            elif text[j] == '"':
+                j += 1
+                break
+            j += 1
+        try: strings.append(json.loads(text[start:j]))
+        except Exception: pass
+        continue
+    if text[j] == '[': nested += 1
+    elif text[j] == ']':
+        if nested == 0: break
+        nested -= 1
+    j += 1
+if plugin in strings:
+    raise SystemExit(0)
 
-###############################################################################
-# v1 install
-###############################################################################
+encoded = json.dumps(plugin)
+# Add as first item. Trailing commas are valid in OpenCode's JSONC config.
+updated = text[:target + 1] + '\n    ' + encoded + ',' + text[target + 1:]
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(updated)
+PY
+}
 
 install_v1() {
-  log "=== OpenCode v1 (tui-plugins) ==="
-  [ -d "$V1_TUI_PLUGINS" ] || { log "skip: $V1_TUI_PLUGINS does not exist (v1 TUI not configured)"; return 0; }
-
-  local bak="$BACKUP_ROOT/$TIMESTAMP/v1"
-  do_cmd "mkdir -p $bak"
-
-  for f in "${V1_FILES[@]}"; do
-    local src="$REPO_ROOT/$f"
-    local dst="$V1_TUI_PLUGINS/$f"
-    [ -e "$src" ] || { err "missing source $src"; continue; }
-    backup_file "$dst" "$bak" >/dev/null
-    do_cmd "cp $src $dst"
-  done
-
-  # Register tui-plugin.ts in the tui.json plugin array (idempotent, text edit,
-  # never re-serialize — the file is JSON-with-comments).
-  if [ -f "$V1_TUI_JSON" ]; then
-    backup_file "$V1_TUI_JSON" "$bak" >/dev/null
-    if grep -q 'tui-plugins/tui-plugin.ts' "$V1_TUI_JSON"; then
-      note "tui-plugin.ts already registered in $V1_TUI_JSON"
-    else
-      do_cmd_insert_tui_json
-    fi
-  else
-    note "no $V1_TUI_JSON — plugin files copied but not registered; add manually:"
-    note "  \"$V1_TUI_PLUGINS/tui-plugin.ts\" to tui.json plugin array"
-  fi
-
-  log "v1 installed. Restart OpenCode to load the TUI plugin."
+  log 'Installing OpenCode v1 TUI plugin'
+  [[ "$DRY_RUN" == true ]] || mkdir -p "$V1_CONFIG_DIR/tui-plugins"
+  install_file tui-plugin.ts "$V1_CONFIG_DIR/tui-plugins/tui-plugin.ts"
+  install_file spellcheck.ts "$V1_CONFIG_DIR/tui-plugins/spellcheck.ts"
+  install_file generate.ts "$V1_CONFIG_DIR/tui-plugins/generate.ts"
+  install_file prompt-templates.ts "$V1_CONFIG_DIR/tui-plugins/prompt-templates.ts"
+  register_v1
 }
-
-# Insert tui-plugin.ts into the tui.json plugin array. The plugin array's last
-# element carries either an inline closing `]` (`"path"],`) or a standalone `]`
-# on the next line. We add a comma to the last element, append our entry, then
-# close the array. Comments between elements are preserved.
-do_cmd_insert_tui_json() {
-  local pluginpath="$V1_TUI_PLUGINS/tui-plugin.ts"
-  local tmp
-  tmp="$(mktemp)"
-  awk -v pluginpath="$pluginpath" '
-    BEGIN { in_plugin=0; pending="" }
-    { line=$0 }
-    /"plugin"\s*:/ { in_plugin=1 }
-    {
-      if (in_plugin && line ~ /^\s*"[\/~]/) {
-        if (line ~ /\]/) {
-          # last element carries the inline closing bracket
-          sub(/\].*$/, "", line)
-          sub(/,"*\s*$/, "", line)
-          if (line !~ /,\s*$/) line = line ","
-          print line
-          print "    \"" pluginpath "\",  // ocx:component opencode-autocomplete"
-          print "  ]"
-          pending=""
-          next
-        }
-        # not the last: flush any earlier pending first, then buffer this one
-        if (pending != "") {
-          if (pending !~ /,\s*$/) pending = pending ","
-          print pending
-        }
-        pending=line
-        next
-      }
-      # non-element line inside the array: flush pending first
-      if (in_plugin && pending != "") {
-        if (pending !~ /,\s*$/) pending = pending ","
-        print pending
-        pending=""
-      }
-      # standalone closing bracket of the array
-      if (in_plugin && line ~ /^\s*\]/) {
-        print "    \"" pluginpath "\",  // ocx:component opencode-autocomplete"
-        print line
-        pending=""
-        next
-      }
-      print
-    }
-  ' "$V1_TUI_JSON" > "$tmp" || true
-  if grep -q 'tui-plugins/tui-plugin.ts' "$tmp"; then
-    do_cmd "mv $tmp $V1_TUI_JSON"
-  else
-    rm -f "$tmp"
-    err "could not locate plugin array in $V1_TUI_JSON; not registered"
-  fi
-}
-
-###############################################################################
-# v2 install
-###############################################################################
 
 install_v2() {
-  log "=== OpenCode v2 (plugins/) ==="
-  [ -d "$V2_CONFIG_DIR" ] || { log "skip: $V2_CONFIG_DIR does not exist (v2 not configured)"; return 0; }
-
-  local bak="$BACKUP_ROOT/$TIMESTAMP/v2"
-  do_cmd "mkdir -p $bak"
-
-  # v2 discovers local plugins from .opencode/plugins/; the TUI entrypoint is
-  # the directory tui-plugin.v2/ containing tui.ts.
-  local dst_dir="$V2_PLUGINS/tui-plugin.v2"
-  backup_file "$dst_dir" "$bak" >/dev/null
-  do_cmd "mkdir -p $dst_dir"
-  for f in "${V2_FILES[@]}"; do
-    local src="$REPO_ROOT/$f"
-    local dst="$V2_CONFIG_DIR/plugins/$f"
-    [ -e "$src" ] || { err "missing source $src"; continue; }
-    mkdir -p "$(dirname "$dst")" 2>/dev/null || true
-    do_cmd "cp $src $dst"
-  done
-
-  log "v2 installed. v2 discovers plugins from .opencode/plugins/ automatically."
+  log 'Installing OpenCode v2 TUI plugin'
+  install_file tui-plugin.v2/tui.ts "$V2_CONFIG_DIR/plugins/tui-plugin.v2/tui.ts"
+  install_file spellcheck.ts "$V2_CONFIG_DIR/plugins/spellcheck.ts"
+  install_file generate.ts "$V2_CONFIG_DIR/plugins/generate.ts"
+  install_file prompt-templates.ts "$V2_CONFIG_DIR/plugins/prompt-templates.ts"
 }
 
-###############################################################################
-# uninstall (restore most recent backups)
-###############################################################################
-
-uninstall_all() {
-  log "=== uninstall opencode-autocomplete ==="
-  if [ ! -d "$BACKUP_ROOT" ]; then
-    log "no backups found at $BACKUP_ROOT; nothing to undo"
-    return 0
+uninstall() {
+  if [[ ! -d "$STATE_ENTRIES" ]]; then
+    log 'No install baseline found; nothing to restore.'
+    return
   fi
-  for gen in v1 v2; do
-    local latest
-    latest="$(ls -1d "$BACKUP_ROOT"/*/$gen 2>/dev/null | sort | tail -n1 || true)"
-    [ -n "$latest" ] || { log "no $gen backup to undo"; continue; }
-    log "restoring $gen from $latest"
-    while IFS= read -r -d '' marker; do
-      local rel="${marker#"$latest"/}"
-      rel="${rel%.exists}"
-      rel="${rel%.absent}"
-      local orig_file="${marker%.exists}"
-      orig_file="${orig_file%.absent}"
-      local orig
-      orig="$(cat "$orig_file.orig" 2>/dev/null || true)"
-      [ -n "$orig" ] || orig="$HOME/$rel"
-      if [ "${marker##*.}" = "exists" ]; then
-        local copy="${marker%.exists}"
-        if [ -e "$copy" ]; then
-          do_cmd "mkdir -p $(dirname "$orig")"
-          do_cmd "cp -a \"$copy\" \"$orig\"" || true
-        fi
-      else
-        # original was absent -> remove the file/dir we created
-        if [ -e "$orig" ]; then
-          if [ -d "$orig" ] && [ ! -L "$orig" ]; then
-            do_cmd "rm -rf \"$orig\"" || true
-          else
-            do_cmd "rm -f \"$orig\"" || true
-          fi
-        fi
-      fi
-    done < <(find "$latest" \( -name '*.exists' -o -name '*.absent' \) -print0 2>/dev/null || true)
+  if [[ "$DRY_RUN" == true ]]; then
+    log 'DRY-RUN: would restore the original files/config saved in install-state'
+    return
+  fi
+  local entry destination kind
+  for entry in "$STATE_ENTRIES"/*; do
+    [[ -d "$entry" ]] || continue
+    destination=$(cat "$entry/path")
+    kind=$(cat "$entry/kind")
+    case "$kind" in
+      absent)
+        if [[ -f "$destination" || -L "$destination" ]]; then rm -f -- "$destination"
+        elif [[ -d "$destination" ]]; then rmdir -- "$destination" 2>/dev/null || true
+        fi ;;
+      file|directory|symlink)
+        rm -rf -- "$destination"
+        mkdir -p "$(dirname "$destination")"
+        cp -a -- "$entry/original" "$destination" ;;
+    esac
+    log "Restored $destination ($kind)"
   done
-  log "uninstall complete. Restart OpenCode."
+  rm -rf -- "$STATE_DIR"
+  log 'Uninstall complete. Restart OpenCode to unload the plugin.'
 }
 
-###############################################################################
-# Main
-###############################################################################
-
-MODE="${1:-both}"
 case "$MODE" in
-  v1)   install_v1 ;;
-  v2)   install_v2 ;;
+  v1) install_v1 ;;
+  v2) install_v2 ;;
   both) install_v1; install_v2 ;;
-  uninstall|undo) uninstall_all ;;
-  *)
-    die "usage: $0 [v1|v2|both|uninstall]"
-    ;;
+  uninstall) uninstall ;;
 esac
+
+if [[ "$MODE" != uninstall ]]; then
+  log "Install plan complete. Restart OpenCode to load the plugin."
+fi

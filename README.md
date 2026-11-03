@@ -64,16 +64,32 @@ the TUI ref). In v2 the Tab binding is registered via `ctx.keymap.layer` with
 the live prompt input, so the completion is surfaced in a dialog for the user
 to copy rather than inserted inline.
 
-## Install (v1)
+## Install
 
-Copy `tui-plugin.ts`, `spellcheck.ts`, `generate.ts`, and `prompt-templates.ts`
-into `~/.config/opencode/tui-plugins/` and add `tui-plugin.ts` to `tui.json`'s
-`plugin` array, then restart OpenCode.
+From a checkout:
 
-## Install (v2)
+```sh
+./install.sh --dry-run     # inspect planned changes
+./install.sh both          # install v1 and v2
+./install.sh v1            # or just v1
+./install.sh v2            # or just v2
+./install.sh uninstall     # restore the pre-install state
+```
 
-Copy `tui-plugin.v2/` (the directory containing `tui.ts`), `spellcheck.ts`, and
-`generate.ts` into `~/.opencode/plugins/`. v2 discovers local plugins from
-`.opencode/plugins/` and loads a TUI plugin's `tui.ts` entrypoint; no config
-entry is required. Autocomplete/spellcheck are exposed on
-`ctx.opencodeAutocomplete` for other v2 tooling to drive.
+The installer backs up original files/config once, is safe to rerun, and
+`uninstall` restores the saved baseline. It supports `OCA_V1_CONFIG_DIR`,
+`OCA_V2_CONFIG_DIR`, and `OCA_BACKUP_ROOT` overrides. Restart OpenCode after
+installing.
+
+For a hosted `curl | bash` install, set `OCA_BASE_URL` to the raw directory
+containing this repository's files:
+
+```sh
+export OCA_BASE_URL=https://raw.githubusercontent.com/OWNER/REPOSITORY/BRANCH
+curl -fsSL "$OCA_BASE_URL/install.sh" | bash -s -- both
+```
+
+Replace the example URL with the project's published location. This repository
+does not currently have a configured Git remote, so there is not yet a real
+project URL to put in that command. Inspect the installer before piping it into
+a shell.
