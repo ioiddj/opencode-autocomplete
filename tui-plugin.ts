@@ -2,6 +2,7 @@
 // Overrides the Tab key with Cursor-style inline prompt autocomplete.
 
 import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
+import { spellcheck, loadConfig } from "./spellcheck.ts"
 
 const id = "opencode-autocomplete"
 
@@ -45,6 +46,22 @@ const plugin: TuiPlugin = async (api) => {
         category: "Autocomplete",
         namespace: "palette",
         run: () => { void complete() },
+      },
+      {
+        name: "autocomplete.spellcheck",
+        title: "Spellcheck prompt",
+        category: "Autocomplete",
+        namespace: "palette",
+        run: () => {
+          const ref = promptRef as any
+          if (!ref) return
+          const current = ref.current?.input ?? ""
+          void spellcheck(current, api.client).then((corrected) => {
+            if (corrected && corrected !== current) {
+              ref.set({ input: corrected, parts: [{ type: "text", text: corrected }] })
+            }
+          })
+        },
       },
     ],
     bindings: [
