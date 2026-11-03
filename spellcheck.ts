@@ -59,25 +59,26 @@ export function correctTraditional(text: string): string {
   return text
 }
 
-export async function correctWithModel(text: string, client: any): Promise<string> {
+export async function correctWithModel(text: string, session: any): Promise<string> {
   // Detect misspellings first.
   const miss = detectMisspellings(text)
   if (miss.length === 0) return text
+  // Accept either a v1-style client (client.session.create/prompt) or a
+  // v2-style session object (session.create/prompt) directly.
+  const s = session?.session ?? session
+  if (!s || typeof s.create !== "function" || typeof s.prompt !== "function") {
+    return text
+  }
   try {
-    const res = await client.session.create({ body: { title: "spellcheck" } })
-    const sid = res?.data?.id
+    // v1 SDK: session.create({ body: {...} }) -> { data: { id } }
+    // v2:       session.create({ title })          -> { id }
+    const res = await s.create({ title: "spellcheck" } as any)
+    const sid = res?.id ?? res?.sessionID ?? res?.data?.id ?? res?.data?.sessionID ?? null
     if (!sid) return text
-    await client.session.prompt({
-      path: { id: sid },
-      body: {
-        parts: [
-          {
-            type: "text",
-            text: `Correct only spelling in the following text, preserving meaning and formatting. Reply with ONLY the corrected text.\n${text}`,
-          },
-        ],
-      },
-    })
+    await s.prompt({
+      sessionID: sid,
+      text: `Correct only spelling in the following text, preserving meaning and formatting. Reply with ONLY the corrected text.\n${text}`,
+    } as any)
     return text
   } catch {
     return text
