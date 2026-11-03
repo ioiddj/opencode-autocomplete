@@ -8,6 +8,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
+import { generateText } from "./generate.ts"
 
 export type SpellcheckMode = "traditional" | "model" | "off"
 
@@ -59,35 +60,24 @@ export function correctTraditional(text: string): string {
   return text
 }
 
-export async function correctWithModel(text: string, session: any): Promise<string> {
-  // Detect misspellings first.
+export async function correctWithModel(text: string): Promise<string> {
+  // Detect misspellings first; only call the model when there is something to fix.
   const miss = detectMisspellings(text)
   if (miss.length === 0) return text
-  // Accept either a v1-style client (client.session.create/prompt) or a
-  // v2-style session object (session.create/prompt) directly.
-  const s = session?.session ?? session
-  if (!s || typeof s.create !== "function" || typeof s.prompt !== "function") {
-    return text
-  }
   try {
-    // v1 SDK: session.create({ body: {...} }) -> { data: { id } }
-    // v2:       session.create({ title })          -> { id }
-    const res = await s.create({ title: "spellcheck" } as any)
-    const sid = res?.id ?? res?.sessionID ?? res?.data?.id ?? res?.data?.sessionID ?? null
-    if (!sid) return text
-    await s.prompt({
-      sessionID: sid,
-      text: `Correct only spelling in the following text, preserving meaning and formatting. Reply with ONLY the corrected text.\n${text}`,
-    } as any)
-    return text
+    const corrected = await generateText({
+      prompt: `Correct only spelling in the following text, preserving meaning and formatting. Reply with ONLY the corrected text, no quotes:\n${text}`,
+      model: null,
+    })
+    return corrected.trim() || text
   } catch {
     return text
   }
 }
 
-export async function spellcheck(text: string, client: any): Promise<string> {
+export async function spellcheck(text: string): Promise<string> {
   const cfg = loadConfig()
   if (!cfg.enabled || cfg.mode === "off") return text
   if (cfg.mode === "traditional") return correctTraditional(text)
-  return correctWithModel(text, client)
+  return correctWithModel(text)
 }

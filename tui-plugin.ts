@@ -2,7 +2,8 @@
 // Overrides the Tab key with Cursor-style inline prompt autocomplete.
 
 import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
-import { spellcheck, loadConfig } from "./spellcheck.ts"
+import { spellcheck } from "./spellcheck.ts"
+import { generateText } from "./generate.ts"
 
 const id = "opencode-autocomplete"
 
@@ -24,15 +25,16 @@ const plugin: TuiPlugin = async (api) => {
     const current = ref.current?.input ?? ""
     if (!current.trim()) return
     try {
-      // Ask the active model to continue the partial prompt.
-      const res = await api.client.session.create({ body: { title: "autocomplete" } } as any)
-      const sid = (res as any)?.data?.id
-      if (!sid) return
-      await api.client.session.prompt({
-        path: { id: sid },
-        body: { parts: [{ type: "text", text: `Complete the following prompt; reply with ONLY the completion text, no quotes:\n${current}` }] },
-      } as any)
-      // We don't block on full response here; best-effort.
+      // Stateless completion via the experimental generate route — no session
+      // created, returns the assistant text directly.
+      const completion = await generateText({
+        prompt: `Complete the following prompt; reply with ONLY the completion text, no quotes:\n${current}`,
+        model: null,
+      })
+      if (!completion) return
+      // Cursor-style: insert the completion into the prompt input (append at
+      // end; we do not track the cursor position from the TUI ref).
+      ref.set({ input: current + " " + completion.trim(), parts: [{ type: "text", text: current + " " + completion.trim() }] })
     } catch {
       api.ui.toast({ variant: "error", message: "autocomplete failed", duration: 2000 })
     }
@@ -56,7 +58,7 @@ const plugin: TuiPlugin = async (api) => {
           const ref = promptRef as any
           if (!ref) return
           const current = ref.current?.input ?? ""
-          void spellcheck(current, api.client).then((corrected) => {
+          void spellcheck(current).then((corrected) => {
             if (corrected && corrected !== current) {
               ref.set({ input: corrected, parts: [{ type: "text", text: corrected }] })
             }
